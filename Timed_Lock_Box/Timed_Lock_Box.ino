@@ -1,4 +1,16 @@
-//Library includes
+/*	Arduino timed lock box.
+*
+*	by William Taylor https://github.com/WMTaylor3/Timed-Lock-Box
+*
+*/
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////Declarations and Variables/////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+//Additional Libraries
 #include <EEPROM.h>
 #include <DS3231.h>
 #include <Wire.h>
@@ -8,38 +20,191 @@
 #include <String.h>
 #include <Arduino.h> 
 
-// Variables for servo
-Servo servo;      // Servo used for locking the box
+//Definitions for hardware buttons.
+#define checkButton 12	// Main button for checking remaining time
+#define upButton 9		// Button for cycling up menus
+#define downButton 10	// Button for cycling down menus
+#define nextButton 11	// Button for confirming selection and moving to next item
 
-				  // Variables for user buttons
-int checkButton = 12;   // Main button for checking remaining time
-int upButton = 9;		// Button for cycling up menus
-int downButton = 10;	// Button for cycling down menus
-int nextButton = 11;	// Button for confirming selection and moving to next item
-
-						// Variables for LCD
+//Variable to represent LCD connection.
 LiquidCrystal_I2C lcd(0x3F, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
 
-// Variables for Real Time Clock
+//Variables relating to timekeeping aspect of the program.
 DS3231 clock;
 int endDate[6];		// Array containing end date
 int remaining[6];	// Array containing remaining time
-					/* Arrays as follows:
-					0 = Year
-					1 = Month
-					2 = Date
-					3 = Hour
-					4 = Minute
-					5 = Second
+					/* Array is as follows:
+					* 0 = Year
+					* 1 = Month
+					* 2 = Date
+					* 3 = Hour
+					* 4 = Minute
+					* 5 = Second
 					*/
 bool h12, PM, centuryTick;	// h12 and PM are used in 12 hour time keeping. They are not used in this project but are required by various functions in the library, likewise with centuryTick
 
-							//State of box
+//Variable representing the state of box
 bool locked;
 
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////Default functions Setup and Loop//////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+/*
+*	Setup function of the program. Runs once when the device is booted.
+*	No inputs or outputs.
+*/
+void setup()
+{
+	//Set pinModes for the above definitions.
+	pinMode(checkButton, INPUT);
+	pinMode(upButton, INPUT);
+	pinMode(downButton, INPUT);
+	pinMode(nextButton, INPUT);
+
+	//Perform initial LCD setup.
+	lcd.begin(16, 2);	//LCD is 16 spcaes wide by two lines tall.
+	lcd.off();	//Turn LCD off until it is needed.
+
+	//Perform initial setup of real time clock.
+	clock.setClockMode(false);
+
+	//Determine whether the device is locked or unlocked by reading value from the EEPROM. If it is locked, read the unlock date from the EEPROM and store it in the above global variables.
+	locked = EEPROM.read(0);
+	if (locked) {
+		ReadDateTimeFromEEPROM();
+	}
+}
+
+/*
+*	Main function of the program. Runs as a loop until device is powered down.
+*	No inputs or outputs.
+*/
+void loop()
+{
+	//Do nothing until the user presses the check screen button, bringing it to +5 volts.
+	if (digitalRead(checkButton) == HIGH)
+	{
+		//Activate the LCD.
+		lcd.on();
+		//Check if the user is wanting to enter the backdoor code by pressing the appropriate button combination. If so, call the backdoor function.
+		if ((digitalRead(upButton) == HIGH) && (digitalRead(downButton) == LOW) && (digitalRead(nextButton) == HIGH))
+		{
+			BackDoor();
+		}
+		//If the device is currently unlocked, prompt the user to enter the end date.
+		if (!locked)
+		{
+			SelectDateTime();
+		}
+		//Calculate the time remaining until the box is due to unlock, display that time. Then turn off the LCD.
+		CalculateRemainingTime();
+		BlankDisplay();
+		lcd.off();
+	}
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/*
+*	Function to prompt the user to input date for the box to unlock.
+*	Takes no input parameters, returns no value.
+*	Operates by calling the SetUnit function for each of the date units (Day, Month, Year) etc in turn.
+*	Essentially this function serves simply to call another function with the appropritate input values.
+*/
+void SelectDateTime() {
+	setEndDateToNow();	//Set the end date/time to this exact moment, this will be used as a starting point to have each unit (day, month, year etc) increased or decreased from.
+	SetUnit(0, "Year", 9999, 0);	//Set the year unit. Maximum possible year is 9999AD and minimum possible year is 0AD.
+	delay(500);
+	SetUnit(1, "Month", 12, 1);		//Set the month unit. Will only accept valid months (i.e. between Jan and Dec).
+	delay(500);
+	SetUnit(2, "Day", DaysInMonth(endDate[1]), 1);	//Set the day unit. Will only accept a maximum of the number of days in that month, determined using the DaysInMonth function.
+	delay(500);
+	SetUnit(3, "Hour", 23, 0);		//Sets the hours unit. Will only accept 0000 hours to 2300. Values between 2300 to 2359 are handled by the minutes value.
+	delay(500);
+	SetUnit(4, "Minute", 59, 0);	//Sets the minutes unit. Will only accept between 0 and 59. As above, further values are handled using the seconds value.
+	delay(500);
+	SetUnit(5, "Second", 59, 0);	//Sets the seconds value. Any value accepted between 0 and 59.
+	BlankDisplay();
+	lcd.setCursor(0, 0);	//Blanks the display.
+	StoreDateTimeToEEPROM();	//Stores the new date and time to the EEPROM.
+	Lock(true);		//Lock the unit.
+}
+
+/*
+*	Function to set the end date to this exact moment.
+*	Called only once, from the above function. Placed in its own function for the sake of modularity.
+*	Takes no input parameters, returns no output.
+*/
+void setEndDateToNow()
+{
+	endDate[0] = clock.getYear() + 2000;
+	endDate[1] = clock.getMonth(centuryTick);
+	endDate[2] = clock.getDate();
+	endDate[3] = clock.getHour(h12, PM);
+	endDate[4] = clock.getMinute();
+	endDate[5] = clock.getSecond();
+}
+
+/*
+*	Function for setting the date and time on the unit.
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////Pick up from here.
+*/
+void SetUnit(int selection, String unitName, int maximum, int minimum)
+{
+	BlankDisplay();
+	lcd.setCursor(0, 0);
+	lcd.print(String("Set " + unitName + ":"));
+	lcd.setCursor(0, 1);
+	lcd.print(String(endDate[selection]));
+	while (true) {
+		if ((digitalRead(upButton) == HIGH) && (digitalRead(downButton) == LOW) && (digitalRead(nextButton) == LOW))
+		{
+			endDate[selection]++;
+			if (endDate[selection] > maximum)
+			{
+				endDate[selection] = minimum;
+			}
+			BlankDisplay();
+			lcd.setCursor(0, 0);
+			lcd.print(String("Set " + unitName + ":"));
+			lcd.setCursor(0, 1);
+			lcd.print(String(endDate[selection]));
+			delay(150);
+		}
+		else if ((digitalRead(upButton) == LOW) && (digitalRead(downButton) == HIGH) && (digitalRead(nextButton) == LOW))
+		{
+			endDate[selection]--;
+			if (endDate[selection] < minimum)
+			{
+				endDate[selection] = maximum;
+			}
+			BlankDisplay();
+			lcd.setCursor(0, 0);
+			lcd.print(String("Set " + unitName + ":"));
+			lcd.setCursor(0, 1);
+			lcd.print(String(endDate[selection]));
+			delay(150);
+		}
+		else if ((digitalRead(upButton) == LOW) && (digitalRead(downButton) == LOW) && (digitalRead(nextButton) == HIGH))
+		{
+			break;
+		}
+	}
+}
+
+/*
+*	Function for storing the time values to the Arduinos EEPROM where they will survive power cycles.
+*	Takes no input parameters.
+*/
 void StoreDateTimeToEEPROM()
 {
-	EEPROM.write(10, endDate[0] - 2000);
+	EEPROM.write(10, endDate[0] - 2000); //2000 value subtracted so that a stored value of, for example, 2012 becomes 12. Purpose is to save space in the EEPROM.
 	EEPROM.write(20, endDate[1]);
 	EEPROM.write(30, endDate[2]);
 	EEPROM.write(40, endDate[3]);
@@ -47,9 +212,14 @@ void StoreDateTimeToEEPROM()
 	EEPROM.write(60, endDate[5]);
 }
 
+/*
+*	Reads new values from EEPROM and into the global variables.
+*	Takes no input parameters.
+*	Is called once upon the device powering up.
+*/
 void ReadDateTimeFromEEPROM()
 {
-	endDate[0] = EEPROM.read(10) + 2000;
+	endDate[0] = EEPROM.read(10) + 2000; //2000 value added so that a stored value of, for example, 12 becomes 2012. Purpose is to save space in the EEPROM.
 	endDate[1] = EEPROM.read(20);
 	endDate[2] = EEPROM.read(30);
 	endDate[3] = EEPROM.read(40);
@@ -57,14 +227,24 @@ void ReadDateTimeFromEEPROM()
 	endDate[5] = EEPROM.read(60);
 }
 
-int DaysInMonth(byte month) {		// The following block determines whether it is a 30, 31, 28 or 29 day month
+/*
+*	Determines whether the month in question is a 31, 30, 29 or 28 day month.
+*	Takes in the month value (i.e 1 = Jan, 2 = Feb etc). Return the number of days in that month.
+*/
+int DaysInMonth(byte month)
+{
+	//If the month in question always has 31 days, return 31.
 	if ((month == 1) || (month == 3) || (month == 5) || (month == 7) || (month == 8) || (month == 10) || (month == 12)) { return 31; }
 	else
+		//If the month in question always has 30 days, return 30.
 		if ((month == 4) || (month == 6) || (month == 9) || (month == 11)) { return 30; }
 		else
+			//If the month in question is Feb and it is a leap year, return 29.
 			if (((month % 4 == 0) && (month % 100 != 0)) || month % 400 == 0) { return 29; }
+			//If the month in question is Feb and it is not a leap year, return 28.
 			else { return 28; }
 }
+
 
 void CalculateRemainingTime()
 {
@@ -207,77 +387,9 @@ void BlankDisplay()
 	lcd.print("                ");
 }
 
-void SelectDateTime() {
-	setEndDateToNow();
-	SetUnit(0, "Year", 9999, 0);
-	delay(500);
-	SetUnit(1, "Month", 12, 1);
-	delay(500);
-	SetUnit(2, "Day", DaysInMonth(endDate[1]), 1);
-	delay(500);
-	SetUnit(3, "Hour", 23, 0);
-	delay(500);
-	SetUnit(4, "Minute", 60, 0);
-	delay(500);
-	SetUnit(5, "Second", 60, 0);
-	BlankDisplay();
-	lcd.setCursor(0, 0);
-	StoreDateTimeToEEPROM();
-	Lock(true);
-}
 
-void SetUnit(int selection, String unitName, int maximum, int minimum)
-{
-	BlankDisplay();
-	lcd.setCursor(0, 0);
-	lcd.print(String("Set " + unitName + ":"));
-	lcd.setCursor(0, 1);
-	lcd.print(String(endDate[selection]));
-	while (true) {
-		if ((digitalRead(upButton) == HIGH) && (digitalRead(downButton) == LOW) && (digitalRead(nextButton) == LOW))
-		{
-			endDate[selection]++;
-			if (endDate[selection] > maximum)
-			{
-				endDate[selection] = minimum;
-			}
-			BlankDisplay();
-			lcd.setCursor(0, 0);
-			lcd.print(String("Set " + unitName + ":"));
-			lcd.setCursor(0, 1);
-			lcd.print(String(endDate[selection]));
-			delay(150);
-		}
-		else if ((digitalRead(upButton) == LOW) && (digitalRead(downButton) == HIGH) && (digitalRead(nextButton) == LOW))
-		{
-			endDate[selection]--;
-			if (endDate[selection] < minimum)
-			{
-				endDate[selection] = maximum;
-			}
-			BlankDisplay();
-			lcd.setCursor(0, 0);
-			lcd.print(String("Set " + unitName + ":"));
-			lcd.setCursor(0, 1);
-			lcd.print(String(endDate[selection]));
-			delay(150);
-		}
-		else if ((digitalRead(upButton) == LOW) && (digitalRead(downButton) == LOW) && (digitalRead(nextButton) == HIGH))
-		{
-			break;
-		}
-	}
-}
 
-void setEndDateToNow()
-{
-	endDate[0] = clock.getYear() + 2000;
-	endDate[1] = clock.getMonth(centuryTick);
-	endDate[2] = clock.getDate();
-	endDate[3] = clock.getHour(h12, PM);
-	endDate[4] = clock.getMinute();
-	endDate[5] = clock.getSecond();
-}
+
 
 void WriteCurrentDateTime(byte year, byte month, byte date, byte hour, byte minute, byte second)
 {
@@ -291,6 +403,8 @@ void WriteCurrentDateTime(byte year, byte month, byte date, byte hour, byte minu
 
 void Lock(bool lock)
 {
+	Servo servo;
+
 	BlankDisplay();
 	lcd.setCursor(0, 0);
 	servo.attach(8);
@@ -311,46 +425,4 @@ void Lock(bool lock)
 	}
 	delay(3000);
 	servo.detach();
-}
-
-void setup()
-{
-	// User input
-	pinMode(checkButton, INPUT);
-	pinMode(upButton, INPUT);
-	pinMode(downButton, INPUT);
-	pinMode(nextButton, INPUT);
-
-	// LCD
-	lcd.begin(16, 2);
-	lcd.off();
-
-	// Real Time Clock
-	clock.setClockMode(false);
-	//WriteCurrentDateTime(2018, 3, 1, 19, 13, 0);      // Sets current date and time using values provided to function
-
-	// Read from EEPROM
-	locked = EEPROM.read(0); // Whether device is locked or not.
-	if (locked) {
-		ReadDateTimeFromEEPROM();
-	}
-}
-
-void loop()
-{
-	if (digitalRead(checkButton) == HIGH)
-	{
-		lcd.on();
-		if ((digitalRead(upButton) == HIGH) && (digitalRead(downButton) == LOW) && (digitalRead(nextButton) == HIGH))
-		{
-			BackDoor();
-		}
-		if (!locked)
-		{
-			SelectDateTime();
-		}
-		CalculateRemainingTime();
-		BlankDisplay();
-		lcd.off();
-	}
 }
